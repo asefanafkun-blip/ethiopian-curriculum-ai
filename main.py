@@ -1,18 +1,24 @@
 import os
+import gc
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
 from supabase import create_client
 import google.generativeai as genai
 
-# Load hidden environment variables from .env file
+# Optimize PyTorch memory usage for 512MB RAM environments
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 load_dotenv()
 
 app = FastAPI(title="Ethiopian Curriculum AI RAG API")
 
-# Add CORS Middleware to allow requests from Streamlit Cloud & Android WebViews
+# Enable CORS for Streamlit & Android WebViews
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Setup Credentials securely from environment variables
+# Setup Credentials
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -29,26 +35,31 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Load Local Embedding Model
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+# Global holder for lazy-loaded embedder
+_embedder = None
+
+def get_embedder():
+    """Lazy load SentenceTransformer only when a request is made."""
+    global _embedder
+    if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+        _embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embedder
 
 
 def resolve_gemini_model():
-    """Detects and returns the appropriate Gemini model ID for your API key."""
+    """Detects and returns the appropriate Gemini model ID."""
     candidates = [
-        "gemini-3.6-flash",
-        "models/gemini-3.6-flash",
         "gemini-1.5-flash",
         "gemini-1.5-pro",
+        "gemini-2.0-flash",
     ]
-
     try:
         available = [
             m.name
             for m in genai.list_models()
             if "generateContent" in m.supported_generation_methods
         ]
-
         for candidate in candidates:
             formatted_name = (
                 candidate
@@ -57,13 +68,12 @@ def resolve_gemini_model():
             )
             if formatted_name in available or candidate in available:
                 return candidate
-
         if available:
             return available[0]
     except Exception as err:
         print(f"Warning during model inspection: {err}")
 
-    return "gemini-3.6-flash"
+    return "gemini-1.5-flash"
 
 
 class QueryRequest(BaseModel):
@@ -75,14 +85,15 @@ class QueryRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    """Root health check for Render container monitoring."""
+    """Lightweight root health check endpoint for Render monitoring."""
     return {"status": "ok", "message": "Ethiopian Curriculum AI API is running!"}
 
 
 @app.post("/api/chat")
 async def chat_endpoint(req: QueryRequest):
     try:
-        # 1. Generate query vector embedding
+        # 1. Get embedder lazily
+        embedder = get_embedder()
         query_vector = embedder.encode(req.query).tolist()
 
         # 2. Query Supabase vector match RPC function
@@ -111,7 +122,7 @@ async def chat_endpoint(req: QueryRequest):
             ).execute()
             chunks = response.data or []
 
-        # 3. Format context & links dynamically
+        # 3. Format context & sources
         context_blocks = []
         sources = []
 
@@ -163,10 +174,13 @@ Retrieved Textbook Context:
 Student Question: {req.query}
 """
 
-        # 5. Execute generation with target model
+        # 5. Execute generation
         target_model = resolve_gemini_model()
         model = genai.GenerativeModel(target_model)
         ai_response = model.generate_content(system_prompt)
+
+        # Force Garbage Collection after response generation
+        gc.collect()
 
         return {
             "answer": ai_response.text,
