@@ -1,8 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
+sentence-transformers
 fastapi
 uvicorn
 supabase
 google-generativeai
-sentence-transformers
 pydantic
 python-dotenv
 streamlit

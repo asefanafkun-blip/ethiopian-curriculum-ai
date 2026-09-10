@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from supabase import create_client
@@ -11,6 +12,15 @@ load_dotenv()
 
 app = FastAPI(title="Ethiopian Curriculum AI RAG API")
 
+# Add CORS Middleware to allow requests from Streamlit Cloud & Android WebViews
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Setup Credentials securely from environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -18,13 +28,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
+
 # Load Local Embedding Model
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 def resolve_gemini_model():
     """Detects and returns the appropriate Gemini model ID for your API key."""
-    # Preferred order according to latest API specifications
     candidates = [
         "gemini-3.6-flash",
         "models/gemini-3.6-flash",
@@ -39,7 +49,6 @@ def resolve_gemini_model():
             if "generateContent" in m.supported_generation_methods
         ]
 
-        # First check preferred models against available models list
         for candidate in candidates:
             formatted_name = (
                 candidate
@@ -54,7 +63,6 @@ def resolve_gemini_model():
     except Exception as err:
         print(f"Warning during model inspection: {err}")
 
-    # Fallback directly to the required model
     return "gemini-3.6-flash"
 
 
@@ -63,6 +71,12 @@ class QueryRequest(BaseModel):
     grade: int | None = None
     subject: str | None = None
     top_k: int = 4
+
+
+@app.get("/")
+def health_check():
+    """Root health check for Render container monitoring."""
+    return {"status": "ok", "message": "Ethiopian Curriculum AI API is running!"}
 
 
 @app.post("/api/chat")
